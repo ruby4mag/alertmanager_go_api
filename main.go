@@ -164,6 +164,7 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 		// De-duplication Starts
 		filter := bson.M{
 			"alertid":     apiAlertData["alertId"].(string) ,
+            "alertstatus": "OPEN",
 		}
 
 		existingEvent := models.DbAlert{}
@@ -272,6 +273,87 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 	// De-duplication Ends
 	}else{
 		fmt.Println("This is a close event")
+        // Find existing open alert first to check grouping info
+		filter := bson.M{
+			"alertid":     apiAlertData["alertId"].(string) ,
+            "alertstatus": "OPEN",
+		}
+        
+        var alertToClose models.DbAlert
+        err := alertCollection.FindOne(context.TODO(), filter).Decode(&alertToClose)
+        if err != nil {
+             // Alert not found or error
+             fmt.Println("Alert to close not found or error:", err)
+             w.WriteHeader(200) // Idempotent success?
+             return
+        }
+        
+        parsedTime := time.Now()
+        if val, ok := apiAlertData["alertTime"].(string); ok && val != "" {
+             layout := "2006-01-02 15:04:05"
+             if t, err := time.Parse(layout, val); err == nil {
+                 parsedTime = t
+             }
+        }
+        
+        update := bson.M{
+            "$set": bson.M{
+                "alertstatus": "CLOSED",
+                "alertcleartime": models.CustomTime{Time: parsedTime},
+            },
+        }
+        
+        updateResult, err := alertCollection.UpdateOne(context.TODO(), filter, update)
+        if err != nil {
+             log.Println("Error closing alert:", err)
+             http.Error(w, "Error database update", http.StatusInternalServerError)
+             return
+        }
+        
+        fmt.Printf("Closed %v alerts matching %s\n", updateResult.ModifiedCount, apiAlertData["alertId"])
+        
+        // Check if Parent needs to be closed
+        if alertToClose.Grouped && alertToClose.GroupIncidentId != "" {
+             // It's a child. Check parent.
+             
+             // Safer: Query parent using _id converted from Hex string
+             pID, err := primitive.ObjectIDFromHex(alertToClose.GroupIncidentId)
+             if err == nil {
+                 // Check if ANY child of this parent is still OPEN
+                 
+                 // Let's find Parent first to get GroupAlerts
+                 var parent models.DbAlert
+                 errP := alertCollection.FindOne(context.TODO(), bson.M{"_id": pID}).Decode(&parent)
+                 if errP == nil {
+                      // Count Checked Children
+                      if len(parent.GroupAlerts) > 0 {
+                          openChildrenCount, _ := alertCollection.CountDocuments(context.TODO(), bson.M{
+                              "_id": bson.M{"$in": parent.GroupAlerts},
+                              "alertstatus": "OPEN",
+                          })
+                          
+                          if openChildrenCount == 0 {
+                              fmt.Println("All children closed. Closing Parent Incident:", pID.Hex())
+                              parentUpdate := bson.M{
+                                  "$set": bson.M{
+                                      "alertstatus": "CLOSED",
+                                      "alertcleartime": models.CustomTime{Time: parsedTime},
+                                  },
+                              }
+                              alertCollection.UpdateOne(context.TODO(), bson.M{"_id": pID}, parentUpdate)
+                          } else {
+                              fmt.Printf("Parent %s still has %d open children.\n", pID.Hex(), openChildrenCount)
+                          }
+                      }
+                 }
+             }
+        }
+
+        w.WriteHeader(200)
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "message": "Alert Closed", 
+            "modifiedCount": updateResult.ModifiedCount,
+        })
 	}
 }
 
@@ -414,7 +496,8 @@ func processTagRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
 }
 
 func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
-	alertGroupCollection := mongoClient.Database(mongodatabase).Collection("alertgroups")
+	fmt.Println("Processing group rules")
+	alertGroupCollection := mongoClient.Database(mongodatabase).Collection("correlationrules")
 	alertCollection := mongoClient.Database(mongodatabase).Collection("alerts")
 	findOptions := options.Find()
     findOptions.SetSort(bson.D{{Key: "groupwindow", Value: 1}})
@@ -433,154 +516,158 @@ func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
 	for _, alertGroupConfig   := range alertGroupConfigs {
 
 		fmt.Println("The alertConfig is ", alertGroupConfig)
-		// check if the alertPattern matches with the incomming event.
-		if (patternFound(alertGroupConfig.GroupTags , maps.Keys( newAlert.AdditionalDetails))){
-			// pattern is found in the incomming event
-			// construct the identifier
-			groupidentifier := ""
-			for _, tag := range alertGroupConfig.GroupTags {
-				groupidentifier = groupidentifier + "--" + newAlert.AdditionalDetails[tag].(string)
-			}
-			// if there is an event in open state with the same identifier
-			fmt.Println("THE IDENTIFIER IS ", groupidentifier)
-			findOptions := options.Find()
-			//findOptions.(bson.D{{Key: "groupidentifier", Value: groupidentifier}, {Key: "alertstatus" ,Value: "OPEN"}})
-			cursor, err := alertCollection.Find(context.TODO(), bson.M{"groupidentifier": groupidentifier , "alertstatus" : "OPEN"},findOptions)
-			if err != nil {
-				log.Fatal(err)
-			}
-			defer cursor.Close(context.TODO())
+        
+        if alertGroupConfig.CorrelationMode == "SIMILARITY" {
+             if processSimilarityRule(newAlert, alertGroupConfig, mongoClient) {
+                 return true
+             }
+        } else {
+		    // check if the alertPattern matches with the incomming event.
+		    if (patternFound(alertGroupConfig.GroupTags , maps.Keys( newAlert.AdditionalDetails))){
+			    // pattern is found in the incomming event
+			    // construct the identifier
+			    groupidentifier := ""
+			    for _, tag := range alertGroupConfig.GroupTags {
+				    groupidentifier = groupidentifier + "--" + newAlert.AdditionalDetails[tag].(string)
+			    }
+			    // if there is an event in open state with the same identifier
+			    fmt.Println("THE IDENTIFIER IS ", groupidentifier)
+			    findOptions := options.Find()
+			    //findOptions.(bson.D{{Key: "groupidentifier", Value: groupidentifier}, {Key: "alertstatus" ,Value: "OPEN"}})
+			    cursor, err := alertCollection.Find(context.TODO(), bson.M{"groupidentifier": groupidentifier , "alertstatus" : "OPEN"},findOptions)
+			    if err != nil {
+				    log.Fatal(err)
+			    }
+			    defer cursor.Close(context.TODO())
 
-			var identifiedalerts []models.DbAlert
+			    var identifiedalerts []models.DbAlert
 
-			if err = cursor.All(context.TODO(), &identifiedalerts); err != nil {
-				log.Fatal(err)
-			}
-			//
-			fmt.Println("THE TIME IS ", newAlert.AlertFirstTime.Unix() )
-			if len(identifiedalerts) != 0 {
-				fmt.Println("************************** FOUND OPEN EVENTS*********************************")
-				idn := identifiedalerts[len(identifiedalerts)-1] 
-				// There are open alerts with the same identifier
-				if newAlert.AlertFirstTime.Unix() - idn.AlertFirstTime.Unix() <= int64(alertGroupConfig.GroupWindow) {
-					// grpupEvent present and active
-					fmt.Printf("Identifier %s is within duration %v \n", groupidentifier , alertGroupConfig.GroupWindow )
-					// add the alert ID to the GroupAlerts 
-					updatefilter := bson.M{"_id": idn.ID }
-
-
-
-					update := bson.D{
-						{Key: "$push", Value: bson.D{
-							{Key: "groupalerts", Value: newAlert.ID},
-						}},
-						// {Key: "$set", Value: bson.D{
-						// 	{Key: "parent", Value: true},
-
-						// }},
-					}
-				
-					updateResult , updateerr := alertCollection.UpdateOne(context.TODO(), updatefilter, update)
-					if updateerr != nil {
-						panic(err)
-					}
-					if updateResult.ModifiedCount > 0 {
-						fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
-					}
-
-					// Update Grouped = true and GroupIncident ID for the alert,
-					updateOriginalAlertfilter := bson.M{"_id": newAlert.ID }
-
-					updateOriginal := bson.M{
-						"$set": bson.M{
-							"groupincidentid": idn.ID,
-							"grouped" : true,
-						},
-					}
-			
-					updateOriginalResult , updateerr := alertCollection.UpdateOne(context.TODO(), updateOriginalAlertfilter, updateOriginal)
-					if updateerr != nil {
-						panic(err)
-					}
-					if updateResult.ModifiedCount > 0 {
-						fmt.Printf("Matched %v documents and updated %v documents.\n", updateOriginalResult.MatchedCount, updateOriginalResult.ModifiedCount)
-					}
-					break
-				}else{ 
-					// create new spog event
-					copy := deepCopy(*newAlert)
-					copy.GroupIdentifier = groupidentifier
-					copy.AlertId = "grouped-"+groupidentifier
-					copy.GroupAlerts = append(copy.GroupAlerts, newAlert.ID)
-					copy.ID = primitive.ObjectID{}
-					// create a new parent alert
-	
-					insertResult , inserterr := alertCollection.InsertOne(context.TODO(), copy)
-					if inserterr != nil {
-						fmt.Println("Insert Error")
-						log.Fatal(inserterr)
-					}
-					fmt.Println("The insert result is ", *insertResult)
-					spogincidentId := insertResult.InsertedID.(primitive.ObjectID)
-					updatefilter := bson.M{"_id": newAlert.ID }
-	
-					update := bson.M{
-						"$set": bson.M{
-							"groupincidentid": spogincidentId,
-							"grouped" : true,
-						},
-					}
-				
-					updateResult , updateerr := alertCollection.UpdateOne(context.TODO(), updatefilter, update)
-					if updateerr != nil {
-						panic(err)
-					}
-					if updateResult.ModifiedCount > 0 {
-						fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
-					}
-					break
-				}
-
-			}else{
-				// create new spog event
-				copy := deepCopy(*newAlert)
-				copy.GroupIdentifier = groupidentifier
-				copy.AlertId = "grouped-"+groupidentifier
-				copy.GroupAlerts = append(copy.GroupAlerts, newAlert.ID)
-				copy.ID = primitive.ObjectID{}
-				copy.Parent = true
-				// create a new parent alert
-
-				insertResult , inserterr := alertCollection.InsertOne(context.TODO(), copy)
-				if inserterr != nil {
-					fmt.Println("Insert Error")
-					log.Fatal(inserterr)
-				}
-				fmt.Println("The insert result is ", *insertResult)
-				spogincidentId := insertResult.InsertedID.(primitive.ObjectID)
-				updatefilter := bson.M{"_id": newAlert.ID }
-
-				update := bson.M{
-					"$set": bson.M{
-						"groupincidentid": spogincidentId,
-						"grouped" : true,
-					},
-				}
-			
-				updateResult , updateerr := alertCollection.UpdateOne(context.TODO(), updatefilter, update)
-				if updateerr != nil {
-					panic(err)
-				}
-				if updateResult.ModifiedCount > 0 {
-					fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
-				}
-				break
-
-			}
+			    if err = cursor.All(context.TODO(), &identifiedalerts); err != nil {
+				    log.Fatal(err)
+			    }
+			    //
+			    fmt.Println("THE TIME IS ", newAlert.AlertFirstTime.Unix() )
+			    if len(identifiedalerts) != 0 {
+				    fmt.Println("************************** FOUND OPEN EVENTS*********************************")
+				    idn := identifiedalerts[len(identifiedalerts)-1] 
+				    // There are open alerts with the same identifier
+				    if newAlert.AlertFirstTime.Unix() - idn.AlertFirstTime.Unix() <= int64(alertGroupConfig.GroupWindow) {
+					    // grpupEvent present and active
+					    fmt.Printf("Identifier %s is within duration %v \n", groupidentifier , alertGroupConfig.GroupWindow )
+					    // add the alert ID to the GroupAlerts 
+					    updatefilter := bson.M{"_id": idn.ID }
 
 
-		}
 
+					    update := bson.D{
+						    {Key: "$push", Value: bson.D{
+							    {Key: "groupalerts", Value: newAlert.ID},
+						    }},
+						    // {Key: "$set", Value: bson.D{
+						    // 	{Key: "parent", Value: true},
+
+						    // }},
+					    }
+				    
+					    updateResult , updateerr := alertCollection.UpdateOne(context.TODO(), updatefilter, update)
+					    if updateerr != nil {
+						    panic(err)
+					    }
+					    if updateResult.ModifiedCount > 0 {
+						    fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
+					    }
+
+					    // Update Grouped = true and GroupIncident ID for the alert,
+					    updateOriginalAlertfilter := bson.M{"_id": newAlert.ID }
+
+					    updateOriginal := bson.M{
+						    "$set": bson.M{
+							    "groupincidentid": idn.ID,
+							    "grouped" : true,
+						    },
+					    }
+			    
+					    updateOriginalResult , updateerr := alertCollection.UpdateOne(context.TODO(), updateOriginalAlertfilter, updateOriginal)
+					    if updateerr != nil {
+						    panic(err)
+					    }
+					    if updateResult.ModifiedCount > 0 {
+						    fmt.Printf("Matched %v documents and updated %v documents.\n", updateOriginalResult.MatchedCount, updateOriginalResult.ModifiedCount)
+					    }
+					    break
+				    }else{ 
+					    // create new spog event
+					    copy := deepCopy(*newAlert)
+					    copy.GroupIdentifier = groupidentifier
+					    copy.AlertId = "grouped-"+groupidentifier
+					    copy.GroupAlerts = append(copy.GroupAlerts, newAlert.ID)
+					    copy.ID = primitive.ObjectID{}
+					    // create a new parent alert
+	    
+					    insertResult , inserterr := alertCollection.InsertOne(context.TODO(), copy)
+					    if inserterr != nil {
+						    fmt.Println("Insert Error")
+						    log.Fatal(inserterr)
+					    }
+					    fmt.Println("The insert result is ", *insertResult)
+					    spogincidentId := insertResult.InsertedID.(primitive.ObjectID)
+					    updatefilter := bson.M{"_id": newAlert.ID }
+	    
+					    update := bson.M{
+						    "$set": bson.M{
+							    "groupincidentid": spogincidentId,
+							    "grouped" : true,
+						    },
+					    }
+				    
+					    updateResult , updateerr := alertCollection.UpdateOne(context.TODO(), updatefilter, update)
+					    if updateerr != nil {
+						    panic(err)
+					    }
+					    if updateResult.ModifiedCount > 0 {
+						    fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
+					    }
+					    break
+				    }
+
+			    }else{
+				    // create new spog event
+				    copy := deepCopy(*newAlert)
+				    copy.GroupIdentifier = groupidentifier
+				    copy.AlertId = "grouped-"+groupidentifier
+				    copy.GroupAlerts = append(copy.GroupAlerts, newAlert.ID)
+				    copy.ID = primitive.ObjectID{}
+				    copy.Parent = true
+				    // create a new parent alert
+
+				    insertResult , inserterr := alertCollection.InsertOne(context.TODO(), copy)
+				    if inserterr != nil {
+					    fmt.Println("Insert Error")
+					    log.Fatal(inserterr)
+				    }
+				    fmt.Println("The insert result is ", *insertResult)
+				    spogincidentId := insertResult.InsertedID.(primitive.ObjectID)
+				    updatefilter := bson.M{"_id": newAlert.ID }
+
+				    update := bson.M{
+					    "$set": bson.M{
+						    "groupincidentid": spogincidentId,
+						    "grouped" : true,
+					    },
+				    }
+			    
+				    updateResult , updateerr := alertCollection.UpdateOne(context.TODO(), updatefilter, update)
+				    if updateerr != nil {
+					    panic(err)
+				    }
+				    if updateResult.ModifiedCount > 0 {
+					    fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
+				    }
+				    break
+
+			    }
+		    }
+        }
 	}
 	return true
 }
