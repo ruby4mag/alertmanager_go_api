@@ -118,6 +118,10 @@ func main() {
 	fmt.Println("\x1b[32mPinged your deployment. You successfully connected to MongoDB!\x1b[0m\n ")
 	fmt.Println("\x1b[32mWaiting for alerts.....\x1b[0m\n")
 
+	http.HandleFunc("/api/v1/changes", func(w http.ResponseWriter, r *http.Request) {
+		ChangeHandler(w, r, mongoClient)
+	})
+
 	go http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		Handler(w, r, mongoClient  )
 	 })
