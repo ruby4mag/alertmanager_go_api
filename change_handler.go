@@ -13,6 +13,9 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+
+	"alertmanager/utilities"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 type ChangeInfo struct {
@@ -29,7 +32,7 @@ type ChangeInfo struct {
 	RawPayload       map[string]interface{} `json:"raw_payload"`
 }
 
-func ChangeHandler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client) {
+func ChangeHandler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client, neo4jDriver neo4j.DriverWithContext) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
 		return
@@ -49,6 +52,16 @@ func ChangeHandler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Cl
 		return
 	}
 	
+	// Risk Assessment
+	riskScore, riskAnalysis, err := utilities.CalculateRisk(context.Background(), neo4jDriver, input.AffectedEntities)
+	if err != nil {
+		fmt.Println("Error calculating risk:", err)
+		// We continue processing, avoiding total failure just because risk calc failed? 
+		// Or we log it. User requirement implies we MUST do it. But if Neo4j is down, maybe still ingest?
+		// "after assesing the score update the field".
+		// I'll proceed with 0 score if error, but log it.
+	}
+
 	// Create DbChange object from input
 	dbChange := models.DbChange{
 		ChangeID:         input.ChangeID,
@@ -60,6 +73,8 @@ func ChangeHandler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Cl
 		ImplementedBy:    input.ImplementedBy,
 		AffectedEntities: input.AffectedEntities,
 		RawPayload:       input.RawPayload,
+		RiskScore:        riskScore,
+		ChangeRiskAnalysis: riskAnalysis,
 		UpdatedAt:        time.Now(),
 	}
 
@@ -133,6 +148,8 @@ func ChangeHandler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Cl
 				"implemented_by":    dbChange.ImplementedBy,
 				"affected_entities": dbChange.AffectedEntities,
 				"raw_payload":       dbChange.RawPayload,
+				"risk_score":        dbChange.RiskScore,
+				"change_risk_analysis": dbChange.ChangeRiskAnalysis,
 				"updated_at":        time.Now(),
 			},
 		}

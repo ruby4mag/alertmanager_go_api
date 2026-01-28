@@ -39,6 +39,8 @@ type DbChange struct {
 	ImplementedBy    string                 `json:"implemented_by" bson:"implemented_by"`
 	AffectedEntities []string               `json:"affected_entities" bson:"affected_entities"`
 	RawPayload       map[string]interface{} `json:"raw_payload" bson:"raw_payload"`
+	RiskScore        int                    `json:"risk_score" bson:"risk_score"`
+	ChangeRiskAnalysis map[string]interface{} `json:"change_risk_analysis" bson:"change_risk_analysis"`
 	CreatedAt        time.Time              `json:"created_at" bson:"created_at"`
 	UpdatedAt        time.Time              `json:"updated_at" bson:"updated_at"`
 }

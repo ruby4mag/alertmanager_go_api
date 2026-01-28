@@ -7,6 +7,8 @@ require (
 	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8
 )
 
+require github.com/neo4j/neo4j-go-driver/v5 v5.28.4 // indirect
+
 require (
 	github.com/golang/snappy v0.0.1 // indirect
 	github.com/klauspost/compress v1.13.6 // indirect

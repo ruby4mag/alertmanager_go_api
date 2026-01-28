@@ -25,6 +25,7 @@ import (
 	"alertmanager/models"
 	"alertmanager/ruleengine"
 	"alertmanager/utilities"
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 
 	"golang.org/x/exp/maps"
 )
@@ -37,6 +38,9 @@ var mongouri = os.Getenv("MONGO_URI")
 var mongodatabase = os.Getenv("MONGO_DB")
 var mongocollection = os.Getenv("MONGO_COLLECTION")
 var NoderedEndpoint = os.Getenv("NODERED_ENDPOINT")
+var neo4jUri = os.Getenv("NEO4J_URI")
+var neo4jUser = os.Getenv("NEO4J_USER")
+var neo4jPass = os.Getenv("NEO4J_PASSWORD")
 
 
 // Wrapper type around models.CustomTime
@@ -118,8 +122,29 @@ func main() {
 	fmt.Println("\x1b[32mPinged your deployment. You successfully connected to MongoDB!\x1b[0m\n ")
 	fmt.Println("\x1b[32mWaiting for alerts.....\x1b[0m\n")
 
+	// Connect to Neo4j
+	if neo4jUri == "" {
+		neo4jUri = "neo4j://localhost:7687"
+	}
+	neo4jAuth := neo4j.BasicAuth(neo4jUser, neo4jPass, "")
+	neo4jDriver, err := neo4j.NewDriverWithContext(neo4jUri, neo4jAuth)
+	if err != nil {
+		fmt.Println("Error creating Neo4j driver:", err)
+	} else {
+		// Use a context for VerifyConnectivity
+		ctx, cancel := context.WithTimeout(context.Background(), 5 * time.Second)
+		defer cancel()
+		if err := neo4jDriver.VerifyConnectivity(ctx); err != nil {
+			fmt.Println("Error verifying Neo4j connectivity:", err)
+		} else {
+			fmt.Println("\x1b[32mConnected to Neo4j!\x1b[0m\n")
+		}
+		// Close driver when main exits
+		defer neo4jDriver.Close(context.Background())
+	}
+
 	http.HandleFunc("/api/v1/changes", func(w http.ResponseWriter, r *http.Request) {
-		ChangeHandler(w, r, mongoClient)
+		ChangeHandler(w, r, mongoClient, neo4jDriver)
 	})
 
 	go http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -776,6 +801,3 @@ func deepCopy(original models.DbAlert) models.DbAlert {
 
     return copy
 }
-
-
-
