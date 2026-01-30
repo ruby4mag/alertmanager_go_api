@@ -744,7 +744,14 @@ func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) boo
 
 			newAlert.AlertDestination = notifyRule.RuleName
 
-			byteSlice, err := json.Marshal(newAlert)
+			// Create a payload that includes both alert data and PagerDuty fields from the notification rule
+			payload := map[string]interface{}{
+				"alert": newAlert,
+				"pagerduty_service": notifyRule.PagerDutyService,
+				"pagerduty_escalation_policy": notifyRule.PagerDutyEscalationPolicy,
+			}
+
+			byteSlice, err := json.Marshal(payload)
 			if err != nil {
 				fmt.Println("Error:", err)
 			}
@@ -761,7 +768,92 @@ func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) boo
 				log.Fatalf("Error reading response body: %v", err)
 			}
 
-    		fmt.Println(string(body))
+			fmt.Println(string(body))
+
+			// Parse PagerDuty response and update alert
+			var pdResponse map[string]interface{}
+			if err := json.Unmarshal(body, &pdResponse); err == nil {
+				// Extract PagerDuty fields
+				alertCollection := mongoClient.Database(mongodatabase).Collection(mongocollection)
+				updateFields := bson.M{}
+
+				if incidentNumber, ok := pdResponse["incident_number"].(float64); ok {
+					updateFields["pagerduty_incident_number"] = int(incidentNumber)
+				}
+				if id, ok := pdResponse["id"].(string); ok {
+					updateFields["pagerduty_incident_id"] = id
+				}
+				if urgency, ok := pdResponse["urgency"].(string); ok {
+					updateFields["pagerduty_urgency"] = urgency
+				}
+				if htmlUrl, ok := pdResponse["html_url"].(string); ok {
+					updateFields["pagerduty_html_url"] = htmlUrl
+				}
+
+				// Extract nested priority.summary
+				if priority, ok := pdResponse["priority"].(map[string]interface{}); ok {
+					if prioritySummary, ok := priority["summary"].(string); ok {
+						updateFields["pagerduty_priority"] = prioritySummary
+					}
+				}
+
+				// Extract nested service.summary
+				if service, ok := pdResponse["service"].(map[string]interface{}); ok {
+					if serviceSummary, ok := service["summary"].(string); ok {
+						updateFields["pagerduty_service"] = serviceSummary
+					}
+				}
+
+				// Extract nested escalation_policy.summary
+				if escalationPolicy, ok := pdResponse["escalation_policy"].(map[string]interface{}); ok {
+					if epSummary, ok := escalationPolicy["summary"].(string); ok {
+						updateFields["pagerduty_escalation_policy"] = epSummary
+					}
+				}
+
+				// Update the alert in MongoDB if we have fields to update
+			if len(updateFields) > 0 {
+				// Reload the alert from DB to get the latest grouping information
+				// (processGrouping may have updated the DB but not the in-memory object)
+				var currentAlert models.DbAlert
+				err := alertCollection.FindOne(context.TODO(), bson.M{"_id": newAlert.ID}).Decode(&currentAlert)
+				if err != nil {
+					fmt.Println("Error reloading alert from DB:", err)
+					currentAlert = *newAlert // Fallback to in-memory version
+				}
+
+				update := bson.M{"$set": updateFields}
+
+				// Check if this is a grouped alert (child)
+				if currentAlert.Grouped && currentAlert.GroupIncidentId != "" {
+					// This is a child alert, update both parent and child
+					parentId, err := primitive.ObjectIDFromHex(currentAlert.GroupIncidentId)
+					if err != nil {
+						fmt.Println("Error converting parent ID:", err)
+					} else {
+						// Update parent alert
+						parentFilter := bson.M{"_id": parentId}
+						parentResult, parentErr := alertCollection.UpdateOne(context.TODO(), parentFilter, update)
+						if parentErr != nil {
+							fmt.Println("Error updating parent alert with PagerDuty info:", parentErr)
+						} else {
+							fmt.Printf("Updated parent alert %s with PagerDuty info. Modified count: %v\n", parentId.Hex(), parentResult.ModifiedCount)
+						}
+					}
+				}
+
+				// Always update the current alert (whether it's a child, parent, or standalone)
+				currentFilter := bson.M{"_id": currentAlert.ID}
+				currentResult, currentErr := alertCollection.UpdateOne(context.TODO(), currentFilter, update)
+				if currentErr != nil {
+					fmt.Println("Error updating current alert with PagerDuty info:", currentErr)
+				} else {
+					fmt.Printf("Updated current alert %s with PagerDuty info. Modified count: %v\n", currentAlert.ID.Hex(), currentResult.ModifiedCount)
+				}
+			}
+			} else {
+				fmt.Println("Error parsing PagerDuty response:", err)
+			}
 		}
 		fmt.Println("The MATCH is ", res)
 	}
