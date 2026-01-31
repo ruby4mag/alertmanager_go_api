@@ -9,11 +9,17 @@ import (
 )
 
 const PagerDutyUpdateEndpoint = "http://192.168.1.201:5678/webhook/pagerduty/incident/update"
+const PagerDutyClearEndpoint = "http://192.168.1.201:5678/webhook/pagerduty/incident/clear"
 
 // PagerDutyUpdatePayload represents the payload to send to PagerDuty update endpoint
 type PagerDutyUpdatePayload struct {
 	IncidentID string `json:"incident_id"`
 	Content    string `json:"content"`
+}
+
+// PagerDutyClearPayload represents the payload to send to PagerDuty clear endpoint
+type PagerDutyClearPayload struct {
+	IncidentID string `json:"incident_id"`
 }
 
 // SendPagerDutyNote sends a note to a PagerDuty incident
@@ -56,5 +62,46 @@ func SendPagerDutyNote(incidentID string, content string) error {
 	}
 
 	fmt.Printf("✅ Successfully sent PagerDuty note to incident %s\n", incidentID)
+	return nil
+}
+
+// ClosePagerDutyIncident closes a PagerDuty incident
+// Returns error if the request fails
+func ClosePagerDutyIncident(incidentID string) error {
+	if incidentID == "" {
+		// No PagerDuty incident associated, skip silently
+		fmt.Println("⚠️  No PagerDuty incident ID provided, skipping close")
+		return nil
+	}
+
+	payload := PagerDutyClearPayload{
+		IncidentID: incidentID,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("error marshaling PagerDuty clear payload: %v", err)
+	}
+
+	fmt.Printf("🔒 Closing PagerDuty incident via: %s\n", PagerDutyClearEndpoint)
+	fmt.Printf("   Incident ID: %s\n", incidentID)
+	fmt.Printf("   Payload: %s\n", string(jsonData))
+
+	resp, err := http.Post(PagerDutyClearEndpoint, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error closing PagerDuty incident: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response body for debugging
+	respBody, _ := ioutil.ReadAll(resp.Body)
+	fmt.Printf("   Response Status: %d\n", resp.StatusCode)
+	fmt.Printf("   Response Body: %s\n", string(respBody))
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("PagerDuty clear returned status: %d", resp.StatusCode)
+	}
+
+	fmt.Printf("✅ Successfully closed PagerDuty incident %s\n", incidentID)
 	return nil
 }

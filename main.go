@@ -393,6 +393,15 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
                                    },
                                }
                                alertCollection.UpdateOne(context.TODO(), bson.M{"_id": pID}, parentUpdate)
+                               
+                               // Close PagerDuty incident when parent is closed
+                               if parent.PagerDutyIncidentId != "" {
+                                   fmt.Printf("🔒 Closing PagerDuty incident for parent alert %s\n", pID.Hex())
+                                   err := utilities.ClosePagerDutyIncident(parent.PagerDutyIncidentId)
+                                   if err != nil {
+                                       log.Printf("Warning: Failed to close PagerDuty incident: %v\n", err)
+                                   }
+                               }
                            } else {
                                fmt.Printf("Parent %s still has %d open children.\n", pID.Hex(), openChildrenCount)
                            }
