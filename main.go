@@ -254,6 +254,20 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 
 				// Now do the Notification processing rules
 				processGrouping(&newAlert , mongoClient)
+				
+				// CRITICAL: Reload alert from DB to get updated grouping information
+				// processGrouping() updates the DB but not the in-memory object
+				var reloadedAlert models.DbAlert
+				err = alertCollection.FindOne(context.TODO(), bson.M{"_id": newAlert.ID}).Decode(&reloadedAlert)
+				if err != nil {
+					fmt.Println("Warning: Could not reload alert from DB after grouping:", err)
+					// Continue with in-memory version as fallback
+				} else {
+					// Use the reloaded version which has updated Grouped and GroupIncidentId fields
+					newAlert = reloadedAlert
+					fmt.Printf("🔄 Reloaded alert from DB: Grouped=%v, GroupIncidentId=%s\n", newAlert.Grouped, newAlert.GroupIncidentId)
+				}
+				
 				processNotifyRules( &newAlert , mongoClient)
 
 				alertjsonData, err := json.Marshal(newAlert)
@@ -348,33 +362,42 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
              // Safer: Query parent using _id converted from Hex string
              pID, err := primitive.ObjectIDFromHex(alertToClose.GroupIncidentId)
              if err == nil {
-                 // Check if ANY child of this parent is still OPEN
-                 
-                 // Let's find Parent first to get GroupAlerts
-                 var parent models.DbAlert
-                 errP := alertCollection.FindOne(context.TODO(), bson.M{"_id": pID}).Decode(&parent)
-                 if errP == nil {
-                      // Count Checked Children
-                      if len(parent.GroupAlerts) > 0 {
-                          openChildrenCount, _ := alertCollection.CountDocuments(context.TODO(), bson.M{
-                              "_id": bson.M{"$in": parent.GroupAlerts},
-                              "alertstatus": "OPEN",
-                          })
-                          
-                          if openChildrenCount == 0 {
-                              fmt.Println("All children closed. Closing Parent Incident:", pID.Hex())
-                              parentUpdate := bson.M{
-                                  "$set": bson.M{
-                                      "alertstatus": "CLOSED",
-                                      "alertcleartime": models.CustomTime{Time: parsedTime},
-                                  },
-                              }
-                              alertCollection.UpdateOne(context.TODO(), bson.M{"_id": pID}, parentUpdate)
-                          } else {
-                              fmt.Printf("Parent %s still has %d open children.\n", pID.Hex(), openChildrenCount)
-                          }
-                      }
-                 }
+                  // Check if ANY child of this parent is still OPEN
+                  
+                  // Let's find Parent first to get GroupAlerts
+                  var parent models.DbAlert
+                  errP := alertCollection.FindOne(context.TODO(), bson.M{"_id": pID}).Decode(&parent)
+                  if errP == nil {
+                       // Send PagerDuty note if parent has a PagerDuty incident
+                       if parent.PagerDutyIncidentId != "" {
+                           noteContent := fmt.Sprintf("%s:%s is CLOSED", alertToClose.Entity, alertToClose.AlertSummary)
+                           err := utilities.SendPagerDutyNote(parent.PagerDutyIncidentId, noteContent)
+                           if err != nil {
+                               log.Printf("Warning: Failed to send PagerDuty note for alert closure: %v\n", err)
+                           }
+                       }
+                       
+                       // Count Checked Children
+                       if len(parent.GroupAlerts) > 0 {
+                           openChildrenCount, _ := alertCollection.CountDocuments(context.TODO(), bson.M{
+                               "_id": bson.M{"$in": parent.GroupAlerts},
+                               "alertstatus": "OPEN",
+                           })
+                           
+                           if openChildrenCount == 0 {
+                               fmt.Println("All children closed. Closing Parent Incident:", pID.Hex())
+                               parentUpdate := bson.M{
+                                   "$set": bson.M{
+                                       "alertstatus": "CLOSED",
+                                       "alertcleartime": models.CustomTime{Time: parsedTime},
+                                   },
+                               }
+                               alertCollection.UpdateOne(context.TODO(), bson.M{"_id": pID}, parentUpdate)
+                           } else {
+                               fmt.Printf("Parent %s still has %d open children.\n", pID.Hex(), openChildrenCount)
+                           }
+                       }
+                  }
              }
         }
 
@@ -623,6 +646,7 @@ func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
 					    if updateResult.ModifiedCount > 0 {
 						    fmt.Printf("Matched %v documents and updated %v documents.\n", updateOriginalResult.MatchedCount, updateOriginalResult.ModifiedCount)
 					    }
+					    
 					    break
 				    }else{ 
 					    // create new spog event
@@ -640,6 +664,8 @@ func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
 					    }
 					    fmt.Println("The insert result is ", *insertResult)
 					    spogincidentId := insertResult.InsertedID.(primitive.ObjectID)
+					    copy.ID = spogincidentId
+					    
 					    updatefilter := bson.M{"_id": newAlert.ID }
 	    
 					    update := bson.M{
@@ -656,6 +682,10 @@ func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
 					    if updateResult.ModifiedCount > 0 {
 						    fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
 					    }
+					    
+					    // CRITICAL: Process notify rules for the parent alert to create PagerDuty incident
+					    fmt.Printf("🔔 Processing notify rules for newly created PARENT alert %s\n", copy.AlertId)
+					    processNotifyRules(&copy, mongoClient)
 					    break
 				    }
 
@@ -676,6 +706,8 @@ func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
 				    }
 				    fmt.Println("The insert result is ", *insertResult)
 				    spogincidentId := insertResult.InsertedID.(primitive.ObjectID)
+				    copy.ID = spogincidentId
+				    
 				    updatefilter := bson.M{"_id": newAlert.ID }
 
 				    update := bson.M{
@@ -692,6 +724,10 @@ func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
 				    if updateResult.ModifiedCount > 0 {
 					    fmt.Printf("Matched %v documents and updated %v documents.\n", updateResult.MatchedCount, updateResult.ModifiedCount)
 				    }
+				    
+				    // CRITICAL: Process notify rules for the parent alert to create PagerDuty incident
+				    fmt.Printf("🔔 Processing notify rules for newly created PARENT alert %s\n", copy.AlertId)
+				    processNotifyRules(&copy, mongoClient)
 				    break
 
 			    }
@@ -744,25 +780,70 @@ func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) boo
 
 			newAlert.AlertDestination = notifyRule.RuleName
 
-			// Create a payload that includes both alert data and PagerDuty fields from the notification rule
-			payload := map[string]interface{}{
-				"alert": newAlert,
-				"pagerduty_service": notifyRule.PagerDutyService,
-				"pagerduty_escalation_policy": notifyRule.PagerDutyEscalationPolicy,
-			}
-
-			byteSlice, err := json.Marshal(payload)
-			if err != nil {
-				fmt.Println("Error:", err)
-			}
-			fmt.Println(byteSlice)
-			response, err := http.Post(NoderedEndpoint, "application/json", bytes.NewBuffer(byteSlice))
-			if err != nil {
-				log.Fatalf("Error making POST request: %v", err)
-			}
-			defer response.Body.Close()
+		// Check if this alert is a CHILD alert (grouped but not a parent)
+		// Parent alerts should create PagerDuty incidents
+		// Child alerts should only update the parent's incident
+		if newAlert.Grouped && !newAlert.Parent && newAlert.GroupIncidentId != "" {
+			fmt.Printf("🔗 Alert %s is a GROUPED CHILD (Grouped=true, Parent=false). Will update parent's PagerDuty incident instead of creating new one.\n", newAlert.AlertId)
 			
-			fmt.Println("Here")
+			// Retrieve parent to get its PagerDuty incident ID
+			alertCollection := mongoClient.Database(mongodatabase).Collection(mongocollection)
+			parentId, err := primitive.ObjectIDFromHex(newAlert.GroupIncidentId)
+			if err != nil {
+				fmt.Println("Error converting parent ID:", err)
+				continue
+			}
+			
+			var parent models.DbAlert
+			err = alertCollection.FindOne(context.TODO(), bson.M{"_id": parentId}).Decode(&parent)
+			if err != nil {
+				fmt.Println("Error retrieving parent alert:", err)
+				continue
+			}
+			
+			// Send update note to parent's PagerDuty incident
+			if parent.PagerDutyIncidentId != "" {
+				noteContent := fmt.Sprintf("%s:%s is OPENED", newAlert.Entity, newAlert.AlertSummary)
+				err := utilities.SendPagerDutyNote(parent.PagerDutyIncidentId, noteContent)
+				if err != nil {
+					log.Printf("Warning: Failed to send PagerDuty note for grouped alert: %v\n", err)
+				}
+			} else {
+				fmt.Println("⚠️  Parent alert does not have a PagerDuty incident ID yet.")
+			}
+			
+			// Skip creating a new incident for this child alert
+			fmt.Println("✅ Skipped creating new PagerDuty incident for grouped child alert")
+			continue
+		}
+
+		// This is either a PARENT alert or a STANDALONE alert - create PagerDuty incident
+		if newAlert.Parent {
+			fmt.Printf("🆕 Alert %s is a PARENT alert (Parent=true). Creating NEW PagerDuty incident for the group.\n", newAlert.AlertId)
+		} else {
+			fmt.Printf("🆕 Alert %s is a STANDALONE alert (Grouped=false). Creating NEW PagerDuty incident.\n", newAlert.AlertId)
+		}
+		fmt.Printf("   Endpoint: %s\n", NoderedEndpoint)
+
+		// Create a payload that includes both alert data and PagerDuty fields from the notification rule
+		payload := map[string]interface{}{
+			"alert": newAlert,
+			"pagerduty_service": notifyRule.PagerDutyService,
+			"pagerduty_escalation_policy": notifyRule.PagerDutyEscalationPolicy,
+		}
+
+		byteSlice, err := json.Marshal(payload)
+		if err != nil {
+			fmt.Println("Error:", err)
+		}
+		fmt.Printf("   Payload size: %d bytes\n", len(byteSlice))
+		response, err := http.Post(NoderedEndpoint, "application/json", bytes.NewBuffer(byteSlice))
+		if err != nil {
+			log.Fatalf("Error making POST request: %v", err)
+		}
+		defer response.Body.Close()
+		
+		fmt.Println("   Received response from PagerDuty create endpoint")
 			body, err := ioutil.ReadAll(response.Body)
 			if err != nil {
 				log.Fatalf("Error reading response body: %v", err)

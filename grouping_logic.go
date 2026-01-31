@@ -231,6 +231,7 @@ func createSimilarityParent(child *models.DbAlert, rule models.DbAlertGroup, col
     }
     
     parentID := insertResult.InsertedID.(primitive.ObjectID)
+    copy.ID = parentID
     
     // Update Child
     childFilter := bson.M{"_id": child.ID}
@@ -242,4 +243,11 @@ func createSimilarityParent(child *models.DbAlert, rule models.DbAlertGroup, col
         },
     }
     collection.UpdateOne(context.TODO(), childFilter, childUpdate)
+    
+    // CRITICAL: Process notify rules for the parent alert to create PagerDuty incident
+    // Get mongoClient from the collection
+    mongoClient := collection.Database().Client()
+    fmt.Printf("🔔 Processing notify rules for newly created PARENT alert %s\n", copy.AlertId)
+    processNotifyRules(&copy, mongoClient)
 }
+
