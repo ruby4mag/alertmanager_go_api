@@ -62,6 +62,16 @@ func (ct *CustomTimeWrapper) UnmarshalJSON(b []byte) error {
     return nil
 }
 
+// Helper function to safely extract string from map, returns empty string if nil or missing
+func getStringOrEmpty(data map[string]interface{}, key string) string {
+	if val, ok := data[key]; ok && val != nil {
+		if strVal, ok := val.(string); ok {
+			return strVal
+		}
+	}
+	return ""
+}
+
 func check_flap() (string,error){
 	var rulesGroup ruleengine.RulesGroup
 
@@ -222,12 +232,12 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 					ServiceName: 		apiAlertData["serviceName"].(string),
 					AlertSummary:		apiAlertData["alertSummary"].(string),
 					AlertStatus:		"OPEN",
-					AlertNotes:			apiAlertData["alertNotes"].(string),
+					AlertNotes:			getStringOrEmpty(apiAlertData, "alertNotes"),
 					AlertAcked:			"NO",
 					Severity:			apiAlertData["severity"].(string),
 					AlertId:			apiAlertData["alertId"].(string),
 					AlertPriority:		"NORMAL",
-					IpAddress:			apiAlertData["ipAddress"].(string),
+					IpAddress:			getStringOrEmpty(apiAlertData, "ipAddress"),
 					AlertCount:			1,
 					AdditionalDetails:	make(map[string]interface{}),
 					Grouped: 			false ,	

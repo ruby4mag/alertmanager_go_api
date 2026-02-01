@@ -1,0 +1,64 @@
+╔══════════════════════════════════════════════════════════════════╗
+║          AlertManager API - Quick Testing Reference             ║
+╚══════════════════════════════════════════════════════════════════╝
+
+📋 AVAILABLE TEST SCRIPTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Generic Tests (15 scenarios)
+   ./test_curl_commands.sh
+
+2. Topology-Based Tests ⭐ (17 scenarios from Neo4j)
+   ./topology_alerts.sh
+
+3. Individual Commands
+   See: CURL_TEST_COMMANDS.md
+
+
+🎯 RECOMMENDED: START HERE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+./topology_alerts.sh
+
+This creates alerts using REAL entities from your Neo4j topology:
+  - DC-1 (Datacenter)
+  - RACK-1-14 (Rack)  
+  - ESX-1-14-7 (ESXi Host)
+  - vm-marriage-9029, vm-serve-2968, etc. (VMs)
+  - Various Applications
+
+
+📊 VERIFY RESULTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+mongosh
+use spog_development
+db.alerts.find().count()
+db.alerts.find({"parent": true}).pretty()
+db.alerts.find({"grouped": true}).pretty()
+
+
+🔄 REGENERATE TOPOLOGY TESTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+export NEO4J_URI=neo4j://192.168.1.201:7687
+export NEO4J_USER=neo4j
+export NEO4J_PASSWORD=kl8j2300
+python3 generate_topology_alerts.py
+
+
+📚 DOCUMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TESTING_SUMMARY.md  - Overview of all testing resources
+TESTING_GUIDE.md    - Complete testing guide
+CURL_TEST_COMMANDS.md - 50+ copy-paste commands
+
+
+🐛 BUG FIX APPLIED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ Fixed panic when ipAddress/alertNotes are missing
+✓ Application rebuilt successfully
+✓ Optional fields now handled gracefully
+
