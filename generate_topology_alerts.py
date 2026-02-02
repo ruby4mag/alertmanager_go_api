@@ -7,7 +7,7 @@ from neo4j import GraphDatabase
 import json
 from datetime import datetime, timedelta
 
-NEO4J_URI = os.getenv("NEO4J_URI", "neo4j://192.168.1.201:7687")
+NEO4J_URI = os.getenv("NEO4J_URI", "neo4j://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "kl8j2300")
 

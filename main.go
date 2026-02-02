@@ -785,7 +785,7 @@ func objectIdToString(id primitive.ObjectID) string {
 }
 
 func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
-	//const PagerDutyCreateEndpoint = "http://192.168.1.201:1880/notifications"
+	// PagerDuty configuration is loaded from environment variables (N8N_PD_CREATE_ENDPOINT, etc.)
 
 	var rulesGroup ruleengine.RulesGroup
 	notifyRulesCollection := mongoClient.Database(mongodatabase).Collection("notifyrules")

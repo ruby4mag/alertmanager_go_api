@@ -41,7 +41,7 @@ db.alerts.find({"grouped": true}).pretty()
 🔄 REGENERATE TOPOLOGY TESTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-export NEO4J_URI=neo4j://192.168.1.201:7687
+export NEO4J_URI=neo4j://localhost:7687
 export NEO4J_USER=neo4j
 export NEO4J_PASSWORD=kl8j2300
 python3 generate_topology_alerts.py
