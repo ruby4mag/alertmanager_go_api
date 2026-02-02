@@ -114,12 +114,12 @@ curl -X POST "http://localhost:8081/" \
   -H "Content-Type: application/json" \
   -d '{
   "entity": "RACK-1-14",
-  "alertTime": "2026-02-01 11:45:09",
+  "alertTime": "2026-02-01 11:46:09",
   "alertSource": "DCIM",
   "serviceName": "DataCenterService",
   "alertSummary": "Rack Temperature Warning",
   "severity": "WARNING",
-  "alertId": "alert-rack-001",
+  "alertId": "alert-rack-00dsa1",
   "alertType": "CREATE",
   "alertNotes": "Alert generated for RACK-1-14",
   "environment": "production",

@@ -37,7 +37,9 @@ import (
 var mongouri = os.Getenv("MONGO_URI")
 var mongodatabase = os.Getenv("MONGO_DB")
 var mongocollection = os.Getenv("MONGO_COLLECTION")
-var NoderedEndpoint = os.Getenv("NODERED_ENDPOINT")
+var PagerDutyCreateEndpoint = os.Getenv("N8N_PD_CREATE_ENDPOINT")
+var PagerDutyUpdateEndpoint = os.Getenv("N8N_PD_UPDATE_ENDPOINT")
+var PagerDutyClearEndpoint = os.Getenv("N8N_PD_CLEAR_ENDPOINT")
 var neo4jUri = os.Getenv("NEO4J_URI")
 var neo4jUser = os.Getenv("NEO4J_USER")
 var neo4jPass = os.Getenv("NEO4J_PASSWORD")
@@ -226,7 +228,7 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 					ID: 				primitive.ObjectID{},
 					Entity:				apiAlertData["entity"].(string),
 					AlertFirstTime:		models.CustomTime{Time: parsedTime},
-					AlertLastTime:		models.CustomTime{},
+					AlertLastTime:		models.CustomTime{Time: parsedTime},
 					AlertClearTime:		models.CustomTime{},
 					AlertSource:		apiAlertData["alertSource"].(string),
 					ServiceName: 		apiAlertData["serviceName"].(string),
@@ -236,7 +238,7 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 					AlertAcked:			"NO",
 					Severity:			apiAlertData["severity"].(string),
 					AlertId:			apiAlertData["alertId"].(string),
-					AlertPriority:		"NORMAL",
+					AlertPriority:		"P4",
 					IpAddress:			getStringOrEmpty(apiAlertData, "ipAddress"),
 					AlertCount:			1,
 					AdditionalDetails:	make(map[string]interface{}),
@@ -300,9 +302,19 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
 			fmt.Printf("Found event: %+v\n", existingEvent)
 			updatefilter := bson.M{"_id": existingEvent.ID }
 
+			layout := "2006-01-02 15:04:05"
+			parsedTime, err := time.Parse(layout, apiAlertData["alertTime"].(string))
+			if err != nil {
+				fmt.Println("Error parsing time for duplicate alert:", err)
+				// If parsing fails, maybe just default to Now or skip updating time? 
+				// For safety, let's use Now if parsing fails, or just keep what we have. 
+				// Using Now as fallback
+				parsedTime = time.Now()
+			}
 			update := bson.M{
 				"$set": bson.M{
 					"alertcount": existingEvent.AlertCount + 1 ,
+					"alertlasttime": models.CustomTime{Time: parsedTime},
 				},
 			}
 		
@@ -381,7 +393,7 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
                        // Send PagerDuty note if parent has a PagerDuty incident
                        if parent.PagerDutyIncidentId != "" {
                            noteContent := fmt.Sprintf("%s:%s is CLOSED", alertToClose.Entity, alertToClose.AlertSummary)
-                           err := utilities.SendPagerDutyNote(parent.PagerDutyIncidentId, noteContent)
+                           err := utilities.SendPagerDutyNote(PagerDutyUpdateEndpoint, parent.PagerDutyIncidentId, noteContent)
                            if err != nil {
                                log.Printf("Warning: Failed to send PagerDuty note for alert closure: %v\n", err)
                            }
@@ -407,16 +419,19 @@ func Handler(w http.ResponseWriter, r *http.Request, mongoClient *mongo.Client )
                                // Close PagerDuty incident when parent is closed
                                if parent.PagerDutyIncidentId != "" {
                                    fmt.Printf("🔒 Closing PagerDuty incident for parent alert %s\n", pID.Hex())
-                                   err := utilities.ClosePagerDutyIncident(parent.PagerDutyIncidentId)
+                                   err := utilities.ClosePagerDutyIncident(PagerDutyClearEndpoint, parent.PagerDutyIncidentId)
                                    if err != nil {
                                        log.Printf("Warning: Failed to close PagerDuty incident: %v\n", err)
                                    }
                                }
                            } else {
                                fmt.Printf("Parent %s still has %d open children.\n", pID.Hex(), openChildrenCount)
+                               // Update Parent Priority based on remaining open children
+                               // Note: UpdateParentPriority is in grouping_logic.go which is in main package
+                               UpdateParentPriority(pID, mongoClient)
                            }
                        }
-                  }
+                 }
              }
         }
 
@@ -634,6 +649,9 @@ func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
 						    {Key: "$push", Value: bson.D{
 							    {Key: "groupalerts", Value: newAlert.ID},
 						    }},
+							{Key: "$set", Value: bson.D{
+								{Key: "alertlasttime", Value: newAlert.AlertFirstTime},
+							}},
 						    // {Key: "$set", Value: bson.D{
 						    // 	{Key: "parent", Value: true},
 
@@ -666,6 +684,9 @@ func processGrouping(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
 						    fmt.Printf("Matched %v documents and updated %v documents.\n", updateOriginalResult.MatchedCount, updateOriginalResult.ModifiedCount)
 					    }
 					    
+						// Update Parent Priority
+						UpdateParentPriority(idn.ID, mongoClient)
+
 					    break
 				    }else{ 
 					    // create new spog event
@@ -764,7 +785,7 @@ func objectIdToString(id primitive.ObjectID) string {
 }
 
 func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) bool {
-	//const NoderedEndpoint = "http://192.168.1.201:1880/notifications"
+	//const PagerDutyCreateEndpoint = "http://192.168.1.201:1880/notifications"
 
 	var rulesGroup ruleengine.RulesGroup
 	notifyRulesCollection := mongoClient.Database(mongodatabase).Collection("notifyrules")
@@ -823,7 +844,7 @@ func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) boo
 			// Send update note to parent's PagerDuty incident
 			if parent.PagerDutyIncidentId != "" {
 				noteContent := fmt.Sprintf("%s:%s is OPENED", newAlert.Entity, newAlert.AlertSummary)
-				err := utilities.SendPagerDutyNote(parent.PagerDutyIncidentId, noteContent)
+				err := utilities.SendPagerDutyNote(PagerDutyUpdateEndpoint, parent.PagerDutyIncidentId, noteContent)
 				if err != nil {
 					log.Printf("Warning: Failed to send PagerDuty note for grouped alert: %v\n", err)
 				}
@@ -842,7 +863,7 @@ func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) boo
 		} else {
 			fmt.Printf("🆕 Alert %s is a STANDALONE alert (Grouped=false). Creating NEW PagerDuty incident.\n", newAlert.AlertId)
 		}
-		fmt.Printf("   Endpoint: %s\n", NoderedEndpoint)
+		fmt.Printf("   Endpoint: %s\n", PagerDutyCreateEndpoint)
 
 		// Create a payload that includes both alert data and PagerDuty fields from the notification rule
 		payload := map[string]interface{}{
@@ -856,7 +877,7 @@ func processNotifyRules(newAlert *models.DbAlert, mongoClient *mongo.Client) boo
 			fmt.Println("Error:", err)
 		}
 		fmt.Printf("   Payload size: %d bytes\n", len(byteSlice))
-		response, err := http.Post(NoderedEndpoint, "application/json", bytes.NewBuffer(byteSlice))
+		response, err := http.Post(PagerDutyCreateEndpoint, "application/json", bytes.NewBuffer(byteSlice))
 		if err != nil {
 			log.Fatalf("Error making POST request: %v", err)
 		}

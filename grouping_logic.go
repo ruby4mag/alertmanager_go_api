@@ -183,6 +183,7 @@ func addToGroup(child, parent *models.DbAlert, collection *mongo.Collection, gro
         {Key: "$set", Value: bson.D{
             {Key: "parent", Value: true}, 
             {Key: "grouped", Value: false}, // Ensure parent remains visible
+            {Key: "alertlasttime", Value: child.AlertFirstTime},
         }},
     }
     
@@ -204,6 +205,10 @@ func addToGroup(child, parent *models.DbAlert, collection *mongo.Collection, gro
     if err != nil {
         log.Println("Error updating child group info:", err)
     }
+
+    // Update Parent Priority
+    mongoClient := collection.Database().Client()
+    UpdateParentPriority(parent.ID, mongoClient)
 }
 
 func createSimilarityParent(child *models.DbAlert, rule models.DbAlertGroup, collection *mongo.Collection, groupIdentifier string) {
@@ -249,5 +254,76 @@ func createSimilarityParent(child *models.DbAlert, rule models.DbAlertGroup, col
     mongoClient := collection.Database().Client()
     fmt.Printf("🔔 Processing notify rules for newly created PARENT alert %s\n", copy.AlertId)
     processNotifyRules(&copy, mongoClient)
+}
+
+// UpdateParentPriority recalculates the priority of a parent alert based on its OPEN children
+func UpdateParentPriority(parentID primitive.ObjectID, mongoClient *mongo.Client) {
+	alertCollection := mongoClient.Database(mongodatabase).Collection("alerts")
+	
+	// Find the parent to get current GroupAlerts
+	var parent models.DbAlert
+	err := alertCollection.FindOne(context.TODO(), bson.M{"_id": parentID}).Decode(&parent)
+	if err != nil {
+		fmt.Println("Error finding parent for priority update:", err)
+		return
+	}
+
+    // If no group alerts, nothing to do (or reset to default P5?)
+    // But parent should have children.
+    if len(parent.GroupAlerts) == 0 {
+        return 
+    }
+
+	// Find all OPEN children
+	filter := bson.M{
+		"_id": bson.M{"$in": parent.GroupAlerts},
+		"alertstatus": "OPEN",
+	}
+
+	cursor, err := alertCollection.Find(context.TODO(), filter)
+	if err != nil {
+		fmt.Println("Error finding children for priority update:", err)
+		return
+	}
+	defer cursor.Close(context.TODO())
+
+	var children []models.DbAlert
+	if err = cursor.All(context.TODO(), &children); err != nil {
+		fmt.Println("Error decoding children:", err)
+		return
+	}
+
+    if len(children) == 0 {
+        // No open children? Parent might be closing soon or already closed.
+        // We probably shouldn't receive this call if we are about to close it, 
+        // but if we do, maybe leave it or set to lowest? 
+        // Let's leave it to avoid race with closure logic.
+        return
+    }
+
+	// Find highest priority (lowest integer value)
+	highestPriority := 100
+	for _, child := range children {
+		p := utilities.PriorityToInt(child.AlertPriority)
+		if p < highestPriority {
+			highestPriority = p
+		}
+	}
+
+	// Update Parent
+    // Use P4 as default baseline if allowed, but here we strictly take from children.
+    // If highestPriority is still 100 (unlikely if children > 0), assume P4.
+    if highestPriority == 100 { highestPriority = 4 }
+
+	newPriority := utilities.IntToPriority(highestPriority)
+	
+	if newPriority != parent.AlertPriority {
+		fmt.Printf("Updating Parent %s Priority: %s -> %s\n", parent.AlertId, parent.AlertPriority, newPriority)
+		update := bson.M{"$set": bson.M{"alertpriority": newPriority}}
+		_, err := alertCollection.UpdateOne(context.TODO(), bson.M{"_id": parentID}, update)
+		if err != nil {
+			fmt.Println("Error updating parent priority:", err)
+		}
+	}
 }
 

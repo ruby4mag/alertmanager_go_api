@@ -8,9 +8,6 @@ import (
 	"net/http"
 )
 
-const PagerDutyUpdateEndpoint = "http://192.168.1.201:5678/webhook/pagerduty/incident/update"
-const PagerDutyClearEndpoint = "http://192.168.1.201:5678/webhook/pagerduty/incident/clear"
-
 // PagerDutyUpdatePayload represents the payload to send to PagerDuty update endpoint
 type PagerDutyUpdatePayload struct {
 	IncidentID string `json:"incident_id"`
@@ -24,10 +21,15 @@ type PagerDutyClearPayload struct {
 
 // SendPagerDutyNote sends a note to a PagerDuty incident
 // Returns error if the request fails
-func SendPagerDutyNote(incidentID string, content string) error {
+func SendPagerDutyNote(endpoint string, incidentID string, content string) error {
 	if incidentID == "" {
 		// No PagerDuty incident associated, skip silently
 		fmt.Println("⚠️  No PagerDuty incident ID provided, skipping note")
+		return nil
+	}
+
+	if endpoint == "" {
+		fmt.Println("⚠️  No PagerDuty update endpoint configured, skipping note")
 		return nil
 	}
 
@@ -41,12 +43,12 @@ func SendPagerDutyNote(incidentID string, content string) error {
 		return fmt.Errorf("error marshaling PagerDuty payload: %v", err)
 	}
 
-	fmt.Printf("📝 Sending PagerDuty UPDATE to: %s\n", PagerDutyUpdateEndpoint)
+	fmt.Printf("📝 Sending PagerDuty UPDATE to: %s\n", endpoint)
 	fmt.Printf("   Incident ID: %s\n", incidentID)
 	fmt.Printf("   Content: %s\n", content)
 	fmt.Printf("   Payload: %s\n", string(jsonData))
 
-	resp, err := http.Post(PagerDutyUpdateEndpoint, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := http.Post(endpoint, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("error sending PagerDuty update: %v", err)
 	}
@@ -67,10 +69,15 @@ func SendPagerDutyNote(incidentID string, content string) error {
 
 // ClosePagerDutyIncident closes a PagerDuty incident
 // Returns error if the request fails
-func ClosePagerDutyIncident(incidentID string) error {
+func ClosePagerDutyIncident(endpoint string, incidentID string) error {
 	if incidentID == "" {
 		// No PagerDuty incident associated, skip silently
 		fmt.Println("⚠️  No PagerDuty incident ID provided, skipping close")
+		return nil
+	}
+
+	if endpoint == "" {
+		fmt.Println("⚠️  No PagerDuty clear endpoint configured, skipping close")
 		return nil
 	}
 
@@ -83,11 +90,11 @@ func ClosePagerDutyIncident(incidentID string) error {
 		return fmt.Errorf("error marshaling PagerDuty clear payload: %v", err)
 	}
 
-	fmt.Printf("🔒 Closing PagerDuty incident via: %s\n", PagerDutyClearEndpoint)
+	fmt.Printf("🔒 Closing PagerDuty incident via: %s\n", endpoint)
 	fmt.Printf("   Incident ID: %s\n", incidentID)
 	fmt.Printf("   Payload: %s\n", string(jsonData))
 
-	resp, err := http.Post(PagerDutyClearEndpoint, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := http.Post(endpoint, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("error closing PagerDuty incident: %v", err)
 	}
