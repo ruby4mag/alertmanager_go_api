@@ -159,9 +159,20 @@ func main() {
 		ChangeHandler(w, r, mongoClient, neo4jDriver)
 	})
 
-	go http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		Handler(w, r, mongoClient  )
-	 })
+	// Dashboard Endpoints
+	http.HandleFunc("/api/v1/dashboard/stats", func(w http.ResponseWriter, r *http.Request) {
+		DashboardStatsHandler(w, r, mongoClient)
+	})
+	http.HandleFunc("/api/v1/dashboard/heatmap", func(w http.ResponseWriter, r *http.Request) {
+		ServiceHeatmapHandler(w, r, mongoClient)
+	})
+	http.HandleFunc("/api/v1/dashboard/trends", func(w http.ResponseWriter, r *http.Request) {
+		AlertTrendsHandler(w, r, mongoClient)
+	})
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		Handler(w, r, mongoClient)
+	})
 	http.ListenAndServe(":8081", nil)
 }
 
