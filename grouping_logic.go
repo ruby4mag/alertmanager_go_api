@@ -86,6 +86,16 @@ func processSimilarityRule(newAlert *models.DbAlert, rule models.DbAlertGroup, m
         // Use pointer to avoid copying large struct
         candidate := &candidates[i]
         
+        // Time window check
+        timeDiff := newAlert.AlertFirstTime.Unix() - candidate.AlertFirstTime.Unix()
+        if timeDiff < 0 {
+            timeDiff = -timeDiff
+        }
+        if timeDiff > int64(rule.GroupWindow) {
+            // fmt.Printf("Candidate %s is outside the time window %v, skipping\n", candidate.AlertId, rule.GroupWindow)
+            continue
+        }
+        
         var candMap map[string]interface{}
         mapstructure.Decode(candidate, &candMap)
         
